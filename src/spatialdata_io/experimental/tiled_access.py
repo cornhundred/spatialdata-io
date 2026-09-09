@@ -24,6 +24,10 @@ from typing import Any
 
 import numpy as np
 
+from spatialdata_io.experimental.expression_index import (
+    add_gene_statistics,
+    write_csc_layer,
+)
 from spatialdata_io.experimental.feature_catalog import FeatureCatalog
 from spatialdata_io.experimental.manifest import (
     PROFILE_NAME,
@@ -70,6 +74,7 @@ def add_spatial_tiling(
     max_row_groups_per_file: int = DEFAULT_MAX_ROW_GROUPS_PER_FILE,
     feature_key: str = "feature_name",
     technology: str = "Xenium",
+    index_expression: bool = True,
     compression: str = "zstd",
 ) -> dict[str, Any]:
     """Add the regular-grid visualization profile to an existing SpatialData store.
@@ -99,6 +104,10 @@ def add_spatial_tiling(
         Column in the points element holding the feature name.
     technology
         Celldega technology string recorded in the manifest.
+    index_expression
+        Add per-gene statistics to ``var`` and a gene-major (CSC) copy of ``X`` as a layer,
+        so a client can read one gene without downloading the whole matrix. Costs a second
+        copy of the non-zeros.
     compression
         Parquet compression codec.
 
@@ -186,6 +195,26 @@ def add_spatial_tiling(
             overwrite=True,
         )
 
+    # Gene-major access and a gene list both require reading every non-zero from a CSR
+    # matrix. Precomputing the statistics and storing the transpose turns "download the
+    # whole matrix" into "read two chunks", which is what makes this scale.
+    expression_index: dict[str, Any] | None = None
+    if index_expression and table is not None and table_element:
+        import scipy.sparse as sp
+
+        stats = add_gene_statistics(table)
+        # SpatialData refuses to overwrite an element inside the store it was read from
+        # (scverse/spatialdata#520), so the table is deleted and rewritten. The statistics
+        # pass has already materialised X, so nothing is read back from the deleted path.
+        csc = table.X.tocsc() if sp.issparse(table.X) else None
+        sdata.delete_element_from_disk(table_element)
+        sdata.write_element(table_element)
+
+        # Written after the table, and directly, because the chunking is the whole point:
+        # AnnData sizes chunks for whole-matrix reads, which costs 24x too much per gene.
+        layer = write_csc_layer(store / "tables" / table_element, csc) if csc is not None else None
+        expression_index = {"var_statistics": stats, **({"csc": layer} if layer else {})}
+
     manifest = build_manifest(
         grid=grid,
         technology=technology,
@@ -201,6 +230,7 @@ def add_spatial_tiling(
             "store_url": "../..",
             "table": table_element or "table",
             "native": ["metadata", "cbg", "images"],
+            **({"expression_index": expression_index} if expression_index else {}),
         },
         source={
             "store": store.name,
