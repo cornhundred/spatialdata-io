@@ -168,7 +168,13 @@ def test_add_spatial_tiling_produces_a_valid_profile(store: Path) -> None:
     manifest = add_spatial_tiling(store, tile_size_px=10.0)
     profile = store / "visualization" / PROFILE_NAME
     assert (profile / MANIFEST_FILENAME).exists()
-    assert (profile / "meta_gene.parquet").exists()
+    # Gene and cell metadata are read from the store's own table, so the profile holds
+    # only what Zarr cannot serve: the tiled display Parquets.
+    assert not (profile / "meta_gene.parquet").exists()
+    assert not (profile / "cell_metadata.parquet").exists()
+    assert not (profile / "cbg").exists()
+    assert manifest["spatialdata"]["native"] == ["metadata", "cbg", "images"]
+    assert manifest["spatialdata"]["store_url"] == "../.."
     validate_manifest(manifest, base_path=profile)
 
 
@@ -209,13 +215,6 @@ def test_row_group_count_matches_grid(store: Path) -> None:
     assert total == grid.num_tiles == manifest["row_group_files"]["transcripts"]["total_row_groups"]
 
 
-def test_cbg_covers_every_gene(store: Path) -> None:
-    manifest = add_spatial_tiling(store, tile_size_px=10.0)
-    cbg = manifest["row_group_files"]["cbg"]
-    assert set(cbg["gene_to_row_group"]) == {"GENEA", "GENEB", "GENEC"}
-    assert "NegControlProbe_0001" not in cbg["gene_to_row_group"]
-
-
 def test_tiling_is_rerunnable(store: Path) -> None:
     """The two-call workflow means users will re-run this; it must not accumulate state."""
     first = add_spatial_tiling(store, tile_size_px=10.0)
@@ -237,11 +236,6 @@ def test_tiling_is_rerunnable(store: Path) -> None:
 def test_missing_element_is_reported(store: Path) -> None:
     with pytest.raises(ValueError, match="points element 'nope' not found"):
         add_spatial_tiling(store, points_element="nope")
-
-
-def test_cbg_can_be_skipped(store: Path) -> None:
-    manifest = add_spatial_tiling(store, tile_size_px=10.0, include_cbg=False)
-    assert "cbg" not in manifest["row_group_files"]
 
 
 # -- one-shot entry point -----------------------------------------------------
@@ -421,10 +415,12 @@ def test_tiling_works_on_a_non_xenium_store(merscope_like_store: Path) -> None:
     # the transform is the element's own, not a hardcoded Xenium pixel size
     assert manifest["row_group_files"]["transcripts"]["display_transform"]["affine_matrix"][0][0] == 5.0
 
-    # Blank-1 is absent from var_names, so it is a control coded above every gene
-    cbg = manifest["row_group_files"]["cbg"]
-    assert set(cbg["gene_to_row_group"]) == {"Gad1", "Slc17a7", "Pvalb"}
-    assert "Blank-1" not in cbg["gene_to_row_group"]
+    # Blank-1 is absent from var_names, so it is a control coded above every gene.
+    # The manifest has to say so: a client reading gene names from `var` alone would
+    # otherwise have no entry for Blank-1's feature_code and would drop its colour.
+    features = manifest["feature_catalog"]
+    assert features["n_genes"] == 3
+    assert features["extra_features"] == ["Blank-1"]
 
     # and the store still reads normally
     sdata = spatialdata.read_zarr(merscope_like_store)

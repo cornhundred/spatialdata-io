@@ -228,58 +228,6 @@ def test_overwrite_guard(written: tuple[Path, dict], shapes: gpd.GeoDataFrame) -
 # -- cell metadata ------------------------------------------------------------
 
 
-def test_cell_metadata_schema_matches_celldega(tmp_path: Path, shapes: gpd.GeoDataFrame) -> None:
-    from spatialdata_io.experimental.shapes_parquet import write_cell_metadata
-
-    out = tmp_path / "cell_metadata.parquet"
-    info = write_cell_metadata(shapes, out, display_transform=XFORM)
-    t = pq.read_table(out)
-    assert t.schema.names == ["name", "geometry"]
-    assert pa.types.is_string(t.schema.field("name").type)
-    assert pa.types.is_list(t.schema.field("geometry").type)
-    assert info["n_cells"] == len(SHAPES_SPEC)
-
-
-def test_cell_metadata_holds_display_pixel_centroids(tmp_path: Path, shapes: gpd.GeoDataFrame) -> None:
-    from spatialdata_io.experimental.shapes_parquet import write_cell_metadata
-
-    out = tmp_path / "cm.parquet"
-    write_cell_metadata(shapes, out, display_transform=XFORM)
-    got = dict(zip(pq.read_table(out)["name"].to_pylist(), pq.read_table(out)["geometry"].to_pylist(), strict=True))
-    for name, (geom, _) in SHAPES_SPEC.items():
-        c = geom.centroid
-        assert got[name] == pytest.approx([c.x * 2, c.y * 2], abs=0.5)
-
-
-def test_cell_metadata_row_order_is_the_cell_code(tmp_path: Path, shapes: gpd.GeoDataFrame) -> None:
-    """A client takes a cell's integer id from its position here, so order is the contract.
-
-    It must match the order used for cell_code in the tiled shapes, or colouring a cell
-    from an expression vector would address the wrong cell.
-    """
-    from spatialdata_io.experimental.shapes_parquet import write_cell_metadata
-
-    table_order = list(SHAPES_SPEC)[::-1]
-    meta = tmp_path / "cm.parquet"
-    write_cell_metadata(shapes, meta, display_transform=XFORM, cell_index=table_order)
-    assert pq.read_table(meta)["name"].to_pylist() == table_order
-
-    tiled = tmp_path / "s.parquet"
-    write_shapes_regular_grid(shapes, tiled, grid=GRID, display_transform=XFORM, cell_index=table_order)
-    back = gpd.read_parquet(tiled)
-    for position, name in enumerate(table_order):
-        assert back.loc[name, CELL_CODE_COLUMN] == position
-
-
-def test_cell_metadata_reports_a_cell_with_no_shape(tmp_path: Path, shapes: gpd.GeoDataFrame) -> None:
-    from spatialdata_io.experimental.shapes_parquet import write_cell_metadata
-
-    with pytest.raises(ValueError, match="have no shape"):
-        write_cell_metadata(
-            shapes, tmp_path / "cm.parquet", display_transform=XFORM, cell_index=[*SHAPES_SPEC, "ghost"]
-        )
-
-
 def test_canonical_shapes_have_no_render_columns(written: tuple[Path, dict]) -> None:
     """The nested display column stays out of the GeoParquet so it still round-trips."""
     out, manifest = written

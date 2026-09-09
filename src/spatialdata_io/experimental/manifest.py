@@ -46,6 +46,8 @@ def build_manifest(
     image_dimensions: dict[str, Any] | None = None,
     max_pyramid_zoom: int | None = None,
     fixed_path_assets: dict[str, Any] | None = None,
+    spatialdata: dict[str, Any] | None = None,
+    feature_catalog: dict[str, Any] | None = None,
     source: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Assemble the profile manifest from the fragments returned by each writer.
@@ -95,6 +97,18 @@ def build_manifest(
         "profile": PROFILE_NAME,
         "profile_version": PROFILE_VERSION,
     }
+    if spatialdata:
+        # Declares that gene/cell metadata, expression and images are read from the store
+        # itself rather than from files here. A manifest without this block describes a
+        # self-contained bundle, which is what DegaFiles are.
+        manifest["spatialdata"] = spatialdata
+    if feature_catalog:
+        # `feature_code` indexes the full catalog: genes in `var` order, then controls.
+        # A client reading gene names from `var` alone sees only the genes, so any control
+        # transcript would index past the end of its colour table and lose its colour --
+        # silently, since it is a small fraction of the points. Recording the names beyond
+        # `var` is what lets the client rebuild the full ordering.
+        manifest["feature_catalog"] = feature_catalog
     if fixed_path_assets:
         # Files a client reads by convention rather than through row_group_files:
         # cell_metadata.parquet, meta_gene.parquet, micron_to_image_transform.csv,
