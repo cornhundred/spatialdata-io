@@ -23,7 +23,7 @@ from spatialdata_io.experimental.manifest import (
     write_manifest,
 )
 from spatialdata_io.experimental.regular_grid import RegularGrid
-from spatialdata_io.experimental.tiled_access import add_spatial_tiling
+from spatialdata_io.experimental.tiled_access import add_spatial_tiling, xenium_spatially_tiled
 
 GRID = RegularGrid(origin_x=0.0, origin_y=0.0, tile_size_px=10.0, num_tiles_x=2, num_tiles_y=3)
 
@@ -149,7 +149,12 @@ def store(tmp_path: Path) -> Path:
     shapes = ShapesModel.parse(gdf)
     set_transformation(shapes, Scale([2.0, 2.0], axes=("x", "y")), "global")
 
-    obs = pd.DataFrame({"region": pd.Categorical(["cell_boundaries"] * 12), "instance_id": range(12)}, index=cells)
+    # Deliberately reverse instance IDs relative to obs_names: cell_code must follow the
+    # table's SpatialData instance_key relationship, not happen to match obs_names.
+    obs = pd.DataFrame(
+        {"region": pd.Categorical(["cell_boundaries"] * 12), "instance_id": cells[::-1]},
+        index=cells,
+    )
     table = TableModel.parse(
         AnnData(
             X=sp.csr_matrix(rng.integers(0, 5, (12, 3)).astype(np.float32)), obs=obs, var=pd.DataFrame(index=genes)
@@ -176,6 +181,15 @@ def test_add_spatial_tiling_produces_a_valid_profile(store: Path) -> None:
     assert manifest["spatialdata"]["native"] == ["metadata", "cbg", "images"]
     assert manifest["spatialdata"]["store_url"] == "../.."
     validate_manifest(manifest, base_path=profile)
+
+    # Shapes are indexed in their own order, while instance_id is reversed in obs.
+    # Codes must be absolute table-row positions resolved through instance_key.
+    import spatialdata
+
+    shapes = spatialdata.read_zarr(store).shapes["cell_boundaries"]
+    cells = [f"cell-{i}" for i in range(12)]
+    for cell in cells:
+        assert shapes.loc[cell, "cell_code"] == 11 - int(cell.removeprefix("cell-"))
 
 
 def test_tiled_store_still_reads_with_read_zarr(store: Path) -> None:
@@ -305,6 +319,29 @@ def test_xenium_spatially_tiled_refuses_to_clobber(tmp_path: Path) -> None:
         xenium_spatially_tiled(tmp_path / "nonexistent_raw", existing)
 
 
+def test_one_shot_indexes_table_before_initial_write(
+    store: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The opt-in Xenium path must not write, delete, then rewrite its table."""
+    import spatialdata
+
+    source = spatialdata.read_zarr(store)
+    monkeypatch.setattr("spatialdata_io.readers.xenium.xenium", lambda *_args, **_kwargs: source)
+
+    def fail_on_delete(*_args, **_kwargs):
+        raise AssertionError("the one-shot path must not delete the freshly written table")
+
+    monkeypatch.setattr(spatialdata.SpatialData, "delete_element_from_disk", fail_on_delete)
+
+    out = tmp_path / "one-shot.zarr"
+    manifest = xenium_spatially_tiled(tmp_path / "raw-placeholder", out, tile_size_px=10.0)
+    table = spatialdata.read_zarr(out).tables["table"]
+    assert {"mean", "std", "max", "non_zero"} <= set(table.var.columns)
+    assert "gene_colors" in table.uns
+    assert "X_csc" in table.layers
+    assert manifest["spatialdata"]["expression_index"]["csc"]["layer"] == "X_csc"
+
+
 def test_tiled_store_can_still_be_rewritten_with_spatialdata_write(store: Path, tmp_path: Path) -> None:
     """The reason the render columns live in their own files.
 
@@ -369,7 +406,7 @@ def merscope_like_store(tmp_path: Path) -> Path:
     shapes = ShapesModel.parse(gdf)
     set_transformation(shapes, Scale([5.0, 5.0], axes=("x", "y")), "global")
 
-    obs = pd.DataFrame({"region": pd.Categorical(["cell_polygons"] * 9), "instance_id": range(9)}, index=cells)
+    obs = pd.DataFrame({"region": pd.Categorical(["cell_polygons"] * 9), "instance_id": cells}, index=cells)
     table = TableModel.parse(
         AnnData(
             X=sp.csr_matrix(rng.integers(0, 6, (9, 3)).astype(np.float32)),
@@ -426,3 +463,20 @@ def test_tiling_works_on_a_non_xenium_store(merscope_like_store: Path) -> None:
     sdata = spatialdata.read_zarr(merscope_like_store)
     assert len(sdata.points["detected_transcripts"]) == 150
     assert len(sdata.shapes["cell_polygons"]) == 9
+
+
+def test_no_table_manifest_does_not_advertise_table_components(store: Path) -> None:
+    manifest = add_spatial_tiling(
+        store,
+        table_element=None,
+        shapes_element=None,
+        tile_size_px=10.0,
+    )
+    assert manifest["spatialdata"]["native"] == ["images"]
+    assert "table" not in manifest["spatialdata"]
+    assert manifest["feature_catalog"]["names"] == [
+        "GENEA",
+        "GENEB",
+        "GENEC",
+        "NegControlProbe_0001",
+    ]

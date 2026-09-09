@@ -1,12 +1,12 @@
 """The visualization profile manifest.
 
 The manifest is what turns a pile of Parquet files into a discoverable profile: it tells a
-client the tile geometry, which files hold which row groups, and which columns to project.
+client the tile geometry, which files hold which row groups, and the display column names.
 Without it a client would have to infer the layout, which is exactly what this profile
 exists to avoid.
 
-Key names follow Celldega's existing ``landscape_parameters.json`` so that its reader can
-consume the manifest unchanged (``use_row_groups``, ``tile_grid``, ``row_group_files``,
+Key names follow Celldega's ``landscape_parameters.json``; the adapt_dega reader also
+understands native SpatialData sources and display column names (``use_row_groups``, ``tile_grid``, ``row_group_files``,
 ``technology``, ``image_info``). Profile-specific additions live under ``profile`` and in
 each entry's column names, so a client that does not understand them still finds the keys
 it expects.
@@ -82,8 +82,8 @@ def build_manifest(
 
     manifest: dict[str, Any] = {
         # -- keys Celldega's existing reader consumes -------------------------
-        # Names and shapes follow a DegaFiles landscape_parameters.json so the reader
-        # needs no special-casing for a SpatialData store.
+        # Legacy keys remain compatible with the DegaFiles manifest. The spatialdata
+        # block and display column names select the native adapter and display schema.
         "technology": technology,
         "use_row_groups": True,
         "use_int_index": True,

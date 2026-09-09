@@ -1,17 +1,13 @@
-"""Assign display colours to genes and to categorical cell annotations.
+"""Assign display colours to genes and categorical cell annotations.
 
-There is no biologically correct colour for a gene, so these are invented either way. The
-question is only where they live, and AnnData already has an answer: ``uns`` holds
-``<name>_colors`` lists aligned to an ordering. Both functions here follow it, so nothing
-new is being proposed -- gene colours go to ``uns["gene_colors"]`` in ``var_names`` order,
-cluster colours to ``uns["<column>_colors"]`` in category order, exactly as scanpy writes
-them.
+Gene colours use ``uns["gene_colors"]`` in ``var_names`` order. This borrows the
+shape of Scanpy's categorical palettes; the gene-specific key and alignment rule
+are profile conventions, not an AnnData gene-colour standard. Unstructured lists
+are not automatically realigned on variable subset/reorder. Callers must maintain
+that association; existing lists are preserved without validation by default.
 
-This is better than a ``var`` column for the same reason it is better than a viewer-specific
-file: it is the shape existing tools already look for.
-
-The palette matches the fallback Celldega generates when a store has no colours, so a store
-looks the same whether or not this ran.
+Cluster colours use ``uns["<column>_colors"]`` in stored category order.
+The palette follows the same golden-ratio hue scheme as Celldega's fallback.
 """
 
 from __future__ import annotations
@@ -22,7 +18,7 @@ from typing import Any
 __all__ = ["add_gene_colors", "add_cluster_colors", "palette", "GENE_COLORS_KEY"]
 
 #: ``uns`` key holding one hex colour per gene, in ``var_names`` order. Follows AnnData's
-#: existing ``<name>_colors`` convention rather than introducing a ``var`` column.
+#: palette naming pattern; the gene-to-position association must be maintained explicitly.
 GENE_COLORS_KEY = "gene_colors"
 
 #: Successive hues are separated by the golden ratio, which keeps neighbouring entries

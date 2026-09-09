@@ -1,24 +1,13 @@
 """Rewrite a Shapes element into regular-grid row groups.
 
-Adds two render-oriented columns beside the canonical geometry:
+Canonical mode preserves geometry and GeoParquet metadata and adds a positional
+``cell_code`` column. ``render_only=True`` writes a separate display file with
+``display_geometry`` (``list<list<fixed_size_list<float32>[2]>>``) and ``cell_code``.
+The flat vertex buffer avoids WKB parsing and per-vertex JavaScript objects.
 
-``display_geometry``
-    ``list<list<fixed_size_list<float32>[2]>>`` -- polygon -> rings -> interleaved integer
-    pixel vertices. The nesting is chosen so a client can lift deck.gl's ``getPolygon``
-    straight out of the flat coordinate child buffer and ``startIndices`` out of the list
-    offsets, with no WKB parsing and no per-vertex JavaScript objects.
-``cell_code``
-    Positional index into the annotating table, so cells can be coloured from a
-    cell-by-gene vector without a string join in the browser.
-
-``display_geometry`` is explicitly a *lossy display* representation: only the exterior
-ring is kept, and for a MultiPolygon only its largest part. The canonical geometry column
-is written through unchanged, and the GeoParquet metadata is preserved so the file is
-still readable by :func:`geopandas.read_parquet` and by SpatialData itself.
-
-Each cell is assigned to exactly one tile, by its centroid in display pixel space. A
-polygon whose outline crosses into a neighbouring tile is *not* duplicated -- duplicating
-would inflate the file and make cell counts wrong.
+Display geometry is lossy: only the exterior ring of the largest polygon part
+is retained. Its centroid assigns the shape to one tile; polygons are not duplicated
+across intersected tiles. This is a polygon path, not support for circle Shapes.
 """
 
 from __future__ import annotations
@@ -34,7 +23,12 @@ import pyarrow.parquet as pq
 import shapely
 from numpy.typing import NDArray
 
-from spatialdata_io.experimental.points_parquet import DisplayTransform, _to_display_pixels
+from spatialdata_io.experimental.points_parquet import (
+    DisplayTransform,
+    _to_display_pixels,
+    _validate_physical_row_groups,
+    _write_one_row_group,
+)
 from spatialdata_io.experimental.regular_grid import (
     DEFAULT_MAX_ROW_GROUPS_PER_FILE,
     RegularGrid,
@@ -46,7 +40,7 @@ __all__ = [
     "write_shapes_regular_grid",
 ]
 
-#: Column holding the nested integer-pixel display polygons.
+#: Column holding the nested float32-pixel display polygons.
 GEOMETRY_COLUMN = "display_geometry"
 #: Column holding the positional cell index.
 CELL_CODE_COLUMN = "cell_code"
@@ -73,7 +67,7 @@ def _display_geometry_array(
 ) -> tuple[pa.ListArray, NDArray[np.uint32], NDArray[np.uint32]]:
     """Build the nested display-geometry array and the per-cell display centroids.
 
-    Returns the Arrow array plus the integer pixel centroid coordinates used for tiling.
+    Returns the Arrow array plus float32 pixel centroid coordinates used for tiling.
     """
     simple = _exterior_only(geometry)
 
@@ -148,8 +142,8 @@ def write_shapes_regular_grid(
     coordinate_system
         Coordinate system used when deriving the transform.
     cell_index
-        Index defining ``cell_code`` order, normally the annotating table's ``obs_names``.
-        Defaults to the shapes' own index order.
+        Sequence defining ``cell_code`` order, or a mapping from shape instance ID to
+        absolute table row position. Defaults to the shapes' own index order.
     max_row_groups_per_file
         Row groups per chunk file.
     compression
@@ -177,7 +171,9 @@ def write_shapes_regular_grid(
     if cell_index is None:
         codes = np.arange(len(shapes), dtype=np.uint32)
     else:
-        positions = {k: i for i, k in enumerate(cell_index)}
+        from collections.abc import Mapping
+
+        positions = dict(cell_index) if isinstance(cell_index, Mapping) else {k: i for i, k in enumerate(cell_index)}
         missing = [k for k in shapes.index if k not in positions]
         if missing:
             raise ValueError(
@@ -235,9 +231,17 @@ def write_shapes_regular_grid(
                 current = file_index
             start, end = int(offsets[tile_id]), int(offsets[tile_id + 1])
             assert writer is not None
-            writer.write_table(table.slice(start, end - start) if end > start else schema.empty_table())
+            _write_one_row_group(writer, table.slice(start, end - start) if end > start else schema.empty_table())
         if writer is not None:
             writer.close()
+        validation_dir = staging if not single_file else staging.parent
+        validation_names = filenames if not single_file else [staging.name]
+        _validate_physical_row_groups(
+            validation_dir,
+            validation_names,
+            total_row_groups=grid.num_tiles,
+            max_row_groups_per_file=max_row_groups_per_file,
+        )
     except BaseException:
         if staging.exists():
             shutil.rmtree(staging) if staging.is_dir() else staging.unlink()

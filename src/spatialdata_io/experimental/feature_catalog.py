@@ -4,9 +4,8 @@ Rendering a transcript layer needs a compact integer per point, not a string. Th
 builds the mapping ``feature name <-> feature_code`` and pins two properties the rest of
 the profile depends on:
 
-1. Genes come first, in the annotating table's ``var_names`` order, so a gene's
-   ``feature_code`` *is* its row-group index in the cell-by-gene file. No second lookup
-   table, and no browser-side string join.
+1. Table features come first in ``var_names`` order, so a gene's ``feature_code``
+   is its column index in X and the derived CSC layer. No second string join is needed.
 2. Non-gene features (negative controls, unassigned codewords) are kept, but are coded
    *above* every gene and flagged. They are never silently folded into a real gene, which
    would fabricate expression.
@@ -176,7 +175,7 @@ class FeatureCatalog:
     # -- serialization --------------------------------------------------------
 
     def to_manifest_dict(self) -> dict[str, Any]:
-        """Summary for the profile manifest. The full mapping lives in ``meta_gene.parquet``."""
+        """Legacy catalog summary. The native profile uses var_names plus top-level extra_features."""
         return {
             "n_features": len(self.names),
             "n_genes": self.n_genes,

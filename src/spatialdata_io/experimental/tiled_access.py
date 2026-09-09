@@ -7,13 +7,19 @@ Two entry points, both a single call:
 :func:`xenium_spatially_tiled`
     Read raw Xenium and write a tiled store in one go.
 
-The one-shot path is internally ``read -> write -> tile``, because the tiling rewrites
-*written* Parquet.
+The one-shot path prepares table annotations before the initial write, then tiles the
+written vector Parquets and writes the tuned CSC buffers.
 
-Everything here is additive and opt-in. A store that has been tiled is still an ordinary
-SpatialData store: :func:`spatialdata.read_zarr` works unchanged, the canonical columns and
-geometries are untouched, and a client that does not know about the profile simply ignores
-the extra columns and the manifest.
+The operation is opt-in and modifies the store in place: canonical Parquets are
+reordered, Shapes gain cell_code, and the table receives derived annotations and a
+CSC layer. Original coordinates and geometries remain authoritative. read_zarr works
+unchanged, but an ordinary SpatialData.write does not preserve the display profile
+or tile row-group layout. Regenerate after saving or editing source data.
+
+The multi-asset operation is not transactional. The existing-store entry point deletes
+and rewrites the table when expression indexing is requested; the one-shot Xenium entry
+point avoids that rewrite. Current support assumes Xenium-compatible instance identifiers,
+centroid layout and display coordinates.
 """
 
 from __future__ import annotations
@@ -54,14 +60,62 @@ __all__ = ["add_spatial_tiling", "xenium_spatially_tiled"]
 PROFILE_DIR = "visualization"
 
 
-#: Display colours cycled through when a channel has none assigned. First is blue, which
-#: is the conventional nuclear stain colour and usually channel 0 (DAPI).
 def _grid_for(points: Any, transform: DisplayTransform, tile_size_px: float) -> RegularGrid:
     """Derive the grid covering the points element in display pixel space."""
     x = points["x"].max().compute() if hasattr(points["x"].max(), "compute") else points["x"].max()
     y = points["y"].max().compute() if hasattr(points["y"].max(), "compute") else points["y"].max()
     px, py = transform.apply(np.array([float(x)]), np.array([float(y)]))
     return RegularGrid.from_bounds(0, 0, float(np.rint(px[0])), float(np.rint(py[0])), tile_size_px)
+
+
+def _cell_positions_for_shapes(table: Any, shapes_element: str) -> dict[Any, int]:
+    """Map one Shapes element's instance IDs to absolute rows in the annotating table."""
+    from spatialdata.models import get_table_keys
+
+    regions, region_key, instance_key = get_table_keys(table)
+    declared = [regions] if isinstance(regions, str) else list(regions)
+    # Xenium's table annotates ``cell_labels`` while the boundary Shapes carry the same
+    # cell instance IDs. When there is only one annotated region, those IDs provide an
+    # unambiguous bridge to the requested boundaries. With several unrelated regions we
+    # require an exact region match rather than guessing.
+    if shapes_element in declared:
+        selected_regions = {shapes_element}
+    elif len(declared) == 1:
+        selected_regions = {declared[0]}
+    else:
+        raise ValueError(
+            f"table does not directly annotate shapes element {shapes_element!r}, and its "
+            f"declared regions {declared} do not identify one unambiguous instance namespace"
+        )
+
+    positions: dict[Any, int] = {}
+    for row_position, (region, instance_id) in enumerate(
+        zip(table.obs[region_key], table.obs[instance_key], strict=True)
+    ):
+        if region not in selected_regions:
+            continue
+        if instance_id in positions:
+            raise ValueError(
+                f"table has duplicate {instance_key!r} value {instance_id!r} for region {shapes_element!r}"
+            )
+        positions[instance_id] = row_position
+    return positions
+
+
+def _prepare_expression_index(table: Any, cluster_column: str | None) -> tuple[Any | None, dict[str, Any]]:
+    """Mutate a table with display metadata and retain a CSC matrix for tuned writing."""
+    import scipy.sparse as sp
+
+    stats = add_gene_statistics(table)
+    colors = add_gene_colors(table)
+    cluster_colors = add_cluster_colors(table, cluster_column) if cluster_column else None
+    csc = table.X.tocsc() if sp.issparse(table.X) else None
+    description: dict[str, Any] = {
+        "var_statistics": stats,
+        **({"gene_colors": colors} if colors else {}),
+        **({"cluster_colors": cluster_colors} if cluster_colors else {}),
+    }
+    return csc, description
 
 
 def add_spatial_tiling(
@@ -78,6 +132,7 @@ def add_spatial_tiling(
     index_expression: bool = True,
     cluster_column: str | None = None,
     compression: str = "zstd",
+    _expression_index: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Add the regular-grid visualization profile to an existing SpatialData store.
 
@@ -93,10 +148,12 @@ def add_spatial_tiling(
     shapes_element
         Name of the Shapes element holding cell boundaries, or ``None`` to skip.
     table_element
-        Name of the annotating table, used for the gene order and the CBG. ``None`` skips
-        the CBG and derives feature codes from the observed features alone.
+        Name of the annotating table, used for gene ordering and expression.
+        ``None`` derives codes from categorical observed features, includes their names
+        in the manifest and does not advertise table-backed viewer components.
     coordinate_system
-        Coordinate system defining display pixel space.
+        Target coordinate system, assumed to coincide with reference-image pixels.
+        The current code does not validate that assumption.
     tile_size_px
         Tile edge length in display pixels. The default of 250 gives roughly 20 cells per
         tile on Xenium-density tissue, which is the granularity the viewer fetches at.
@@ -178,12 +235,13 @@ def add_spatial_tiling(
             raise ValueError(f"shapes element {shapes_element!r} not found; have {list(sdata.shapes)}")
         shapes = sdata.shapes[shapes_element]
         shapes_transform = DisplayTransform.from_element(shapes, coordinate_system)
+        cell_positions = _cell_positions_for_shapes(table, shapes_element) if table is not None else None
         cell_segmentation = write_shapes_regular_grid(
             shapes,
             profile_dir / "cell_seg",
             grid=grid,
             display_transform=shapes_transform,
-            cell_index=list(table.obs_names) if table is not None else None,
+            cell_index=cell_positions,
             max_row_groups_per_file=max_row_groups_per_file,
             compression=compression,
             render_only=True,
@@ -194,38 +252,40 @@ def add_spatial_tiling(
             store / "shapes" / shapes_element / "shapes.parquet",
             grid=grid,
             display_transform=shapes_transform,
-            cell_index=list(table.obs_names) if table is not None else None,
+            cell_index=cell_positions,
             max_row_groups_per_file=max_row_groups_per_file,
             compression=compression,
             overwrite=True,
         )
 
     # Gene-major access and a gene list both require reading every non-zero from a CSR
-    # matrix. Precomputing the statistics and storing the transpose turns "download the
+    # matrix. Precomputing the statistics and storing a CSC copy turns "download the
     # whole matrix" into "read two chunks", which is what makes this scale.
-    expression_index: dict[str, Any] | None = None
+    expression_index: dict[str, Any] | None = _expression_index
     if index_expression and table is not None and table_element:
-        import scipy.sparse as sp
-
-        stats = add_gene_statistics(table)
-        colors = add_gene_colors(table)
-        cluster_colors = add_cluster_colors(table, cluster_column) if cluster_column else None
+        csc, expression_index = _prepare_expression_index(table, cluster_column)
         # SpatialData refuses to overwrite an element inside the store it was read from
         # (scverse/spatialdata#520), so the table is deleted and rewritten. The statistics
         # pass has already materialised X, so nothing is read back from the deleted path.
-        csc = table.X.tocsc() if sp.issparse(table.X) else None
         sdata.delete_element_from_disk(table_element)
         sdata.write_element(table_element)
 
         # Written after the table, and directly, because the chunking is the whole point:
         # AnnData sizes chunks for whole-matrix reads, which costs 24x too much per gene.
         layer = write_csc_layer(store / "tables" / table_element, csc) if csc is not None else None
-        expression_index = {
-            "var_statistics": stats,
-            **({"csc": layer} if layer else {}),
-            **({"gene_colors": colors} if colors else {}),
-            **({"cluster_colors": cluster_colors} if cluster_colors else {}),
-        }
+        if layer:
+            expression_index["csc"] = layer
+
+    native_components = ["images"]
+    if table is not None:
+        native_components[:0] = ["metadata", "cbg"]
+    spatialdata_manifest: dict[str, Any] = {
+        "store_url": "../..",
+        "native": native_components,
+        **({"table": table_element} if table_element else {}),
+        **({"cluster_column": cluster_column} if cluster_column else {}),
+        **({"expression_index": expression_index} if expression_index else {}),
+    }
 
     manifest = build_manifest(
         grid=grid,
@@ -237,14 +297,9 @@ def add_spatial_tiling(
         feature_catalog={
             "n_genes": catalog.n_genes,
             "extra_features": list(catalog.names[catalog.n_genes :]),
+            **({"names": list(catalog.names)} if table is None else {}),
         },
-        spatialdata={
-            "store_url": "../..",
-            "table": table_element or "table",
-            "native": ["metadata", "cbg", "images"],
-            **({"cluster_column": cluster_column} if cluster_column else {}),
-            **({"expression_index": expression_index} if expression_index else {}),
-        },
+        spatialdata=spatialdata_manifest,
         source={
             "store": store.name,
             "points_element": points_element,
@@ -305,12 +360,33 @@ def xenium_spatially_tiled(
             raise FileExistsError(f"{output_path} exists; pass overwrite=True to replace it")
         shutil.rmtree(output_path)
 
+    tiling_options = dict(tiling or {})
+    index_expression = bool(tiling_options.pop("index_expression", True))
+    table_element = tiling_options.get("table_element", "table")
+    cluster_column = tiling_options.get("cluster_column")
+
     sdata = xenium(raw_path, **xenium_kwargs)
+    expression_index: dict[str, Any] | None = None
+    csc = None
+    if index_expression and table_element is not None:
+        table = sdata.tables[table_element]
+        csc, expression_index = _prepare_expression_index(table, cluster_column)
     sdata.write(output_path)
+
+    # The one-shot path writes table annotations with the initial store, so it never
+    # deletes and rewrites that table. Only the CSC buffers are replaced afterward to
+    # give them the small chunks required for per-gene browser reads.
+    if csc is not None and table_element is not None:
+        layer = write_csc_layer(output_path / "tables" / table_element, csc)
+        expression_index = expression_index or {}
+        expression_index["csc"] = layer
+
     return add_spatial_tiling(
         output_path,
         tile_size_px=tile_size_px,
         max_row_groups_per_file=max_row_groups_per_file,
         compression=compression,
-        **(tiling or {}),
+        index_expression=False,
+        _expression_index=expression_index,
+        **tiling_options,
     )

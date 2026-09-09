@@ -1,7 +1,7 @@
 """Make gene-major expression reads cheap, without inventing a format.
 
 ``X`` is stored CSR (cell-major), which is right for the usual analysis access pattern of
-"give me this cell's profile". A viewer wants the transpose: "give me this gene across all
+"give me this cell's profile". A viewer wants column access: "give me this gene across all
 cells". Fetching a column from CSR touches every chunk, so a client either downloads the
 whole matrix or does nothing lazily at all -- 4.5 MB for Xenium pancreas, 54.8 MB for Prime
 skin, and unbounded beyond that.
@@ -16,9 +16,10 @@ a CSC layer
     A gene-major copy of ``X``. One gene becomes ``indptr[g]:indptr[g+1]`` -- a slice of one
     or two chunks, about 6,600 non-zeros for skin -- instead of the entire matrix.
 
-The cost is a second copy of the non-zeros. That is real, but it is smaller than the
-gene-major Parquet it replaces (54.8 MB against 150.3 MB for skin) and it stays inside the
-table rather than beside it.
+The cost is a second copy of the non-zeros. Historical rebuilt skin measurements were
+about 104 MB for this CSC layer versus 150.3 MB for the previous gene-major Parquet.
+The layer's contents round-trip as AnnData, but custom chunk sizes need not survive an
+ordinary rewrite. Fixed-length chunks target average gene density, not gene boundaries.
 """
 
 from __future__ import annotations

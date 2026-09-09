@@ -1,21 +1,14 @@
 """Rewrite a Points element into regular-grid row groups.
 
-The output keeps every canonical column and adds two render-oriented ones:
+Canonical mode preserves the source columns and index, dropping display columns
+left by earlier experimental versions. ``render_only=True`` instead writes a
+separate two-column display file: interleaved ``fixed_size_list<float32>[2]``
+``display_xy`` and unsigned integer ``feature_code``. Coordinates are unrounded.
 
-``display_xy``
-    ``fixed_size_list<uint32>[2]`` of integer level-0 pixel coordinates. The Arrow child
-    buffer is therefore already ``[x0, y0, x1, y1, ...]`` -- directly usable as a deck.gl
-    binary ``getPosition`` attribute with no interleaving step in the browser.
-``feature_code``
-    Small unsigned integer into the :class:`FeatureCatalog`.
-
-Physical row order changes (rows are grouped by tile), but no row is added, dropped or
-altered, and the DataFrame index is preserved so the reordering is fully traceable.
-
-Row groups are written one-per-logical-tile *including empty tiles*, so a client can find
-a tile's data from the tile formula alone, with no lookup table and no reliance on Parquet
-statistics. Output is split across several files because a reader must fetch a whole
-footer before reading any row group, and footer size grows with row-group count.
+Rows are stably grouped by tile and files are split to limit footer size. The
+intended contract is one physical row group per tile, including empty tiles.
+The current write_table calls need an explicit row-group size to enforce this
+for tiles exceeding PyArrow's default row-group limit.
 """
 
 from __future__ import annotations
@@ -45,13 +38,18 @@ __all__ = [
     "write_points_regular_grid",
 ]
 
-#: Column holding interleaved integer pixel positions.
+#: Column holding interleaved float32 pixel positions.
 POSITION_COLUMN = "display_xy"
 #: Column holding the integer feature code.
 FEATURE_COLUMN = "feature_code"
 
-#: Largest coordinate float32 represents exactly to better than 0.01 px.
+#: Current coordinate magnitude guard; this does not guarantee 0.01 px precision.
 _FLOAT32_SAFE_MAX = 2**24
+
+# PyArrow caps requested Parquet row groups at 64 Mi rows. Above this, one call to
+# ``write_table`` necessarily produces more than one physical row group, which would
+# break the profile's ``tile_id == row_group_index`` addressing contract.
+_MAX_ROWS_PER_TILE = 64 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -220,7 +218,37 @@ def _write_tile_row_groups(
     offsets = np.searchsorted(sorted_tile_ids, np.array([*tile_range, tile_range.stop]), side="left")
     for i in range(len(tile_range)):
         start, end = int(offsets[i]), int(offsets[i + 1])
-        writer.write_table(table.slice(start, end - start) if end > start else schema.empty_table())
+        _write_one_row_group(writer, table.slice(start, end - start) if end > start else schema.empty_table())
+
+
+def _write_one_row_group(writer: pq.ParquetWriter, table: pa.Table) -> None:
+    """Write exactly one physical Parquet row group, including for an empty tile."""
+    n_rows = table.num_rows
+    if n_rows > _MAX_ROWS_PER_TILE:
+        raise ValueError(
+            f"one tile contains {n_rows:,} rows, above Parquet's supported single-row-group "
+            f"limit of {_MAX_ROWS_PER_TILE:,}; reduce tile_size_px"
+        )
+    writer.write_table(table, row_group_size=max(1, n_rows))
+
+
+def _validate_physical_row_groups(
+    directory: Path,
+    filenames: list[str],
+    *,
+    total_row_groups: int,
+    max_row_groups_per_file: int,
+) -> None:
+    """Verify the file footers match the formula encoded in the manifest."""
+    for file_index, filename in enumerate(filenames):
+        remaining = total_row_groups - file_index * max_row_groups_per_file
+        expected = min(max_row_groups_per_file, remaining)
+        actual = pq.ParquetFile(directory / filename).metadata.num_row_groups
+        if actual != expected:
+            raise RuntimeError(
+                f"{filename} contains {actual} physical row groups; expected {expected}. "
+                "The tile-to-row-group addressing contract would be invalid."
+            )
 
 
 def _iter_chunks(points: Any) -> Any:
@@ -374,6 +402,12 @@ def write_points_regular_grid(
                 write_statistics=False,
             ) as writer:
                 _write_tile_row_groups(writer, table, sorted_tile_ids, tile_range, schema)
+        _validate_physical_row_groups(
+            staging,
+            filenames,
+            total_row_groups=grid.num_tiles,
+            max_row_groups_per_file=max_row_groups_per_file,
+        )
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
         raise
@@ -536,6 +570,12 @@ def _write_streaming(
 
             del table
             spill_path.unlink(missing_ok=True)
+        _validate_physical_row_groups(
+            staging,
+            filenames,
+            total_row_groups=grid.num_tiles,
+            max_row_groups_per_file=max_row_groups_per_file,
+        )
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
         shutil.rmtree(spill, ignore_errors=True)

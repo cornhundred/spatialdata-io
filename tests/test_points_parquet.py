@@ -27,6 +27,7 @@ from spatialdata_io.experimental.feature_catalog import FeatureCatalog
 from spatialdata_io.experimental.points_parquet import (
     FEATURE_COLUMN,
     POSITION_COLUMN,
+    DisplayTransform,
     write_points_regular_grid,
 )
 from spatialdata_io.experimental.regular_grid import RegularGrid
@@ -130,6 +131,30 @@ def test_empty_tile_is_a_zero_row_row_group(fixture: str, request: pytest.Fixtur
     file_index, local = GRID.chunk_location(4, manifest["max_row_groups_per_file"])
     md = pq.ParquetFile(directory / manifest["files"][file_index]).metadata
     assert md.row_group(local).num_rows == 0
+
+
+def test_dense_tile_stays_one_physical_row_group(tmp_path: Path) -> None:
+    """PyArrow otherwise splits a table just above 1 Mi rows despite one write call."""
+    n = 1_048_577
+    points = pd.DataFrame(
+        {
+            "x": np.zeros(n, dtype=np.float32),
+            "y": np.zeros(n, dtype=np.float32),
+            "feature_name": pd.Categorical.from_codes(np.zeros(n, dtype=np.int8), ["GENEA"]),
+        }
+    )
+    out = tmp_path / "dense"
+    manifest = write_points_regular_grid(
+        points,
+        out,
+        catalog=FeatureCatalog(("GENEA",), 1),
+        grid=RegularGrid(0, 0, 10, 1, 1),
+        display_transform=DisplayTransform(((1, 0, 0), (0, 1, 0)), "global"),
+        render_only=True,
+    )
+    parquet = pq.ParquetFile(out / manifest["files"][0])
+    assert parquet.metadata.num_row_groups == 1
+    assert parquet.metadata.row_group(0).num_rows == n
 
 
 def test_boundary_point_goes_to_the_upper_tile(rendered: tuple[Path, dict]) -> None:
