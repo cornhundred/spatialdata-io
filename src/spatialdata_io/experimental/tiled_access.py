@@ -24,6 +24,7 @@ from typing import Any
 
 import numpy as np
 
+from spatialdata_io.experimental.display_colors import add_cluster_colors, add_gene_colors
 from spatialdata_io.experimental.expression_index import (
     add_gene_statistics,
     write_csc_layer,
@@ -75,6 +76,7 @@ def add_spatial_tiling(
     feature_key: str = "feature_name",
     technology: str = "Xenium",
     index_expression: bool = True,
+    cluster_column: str | None = None,
     compression: str = "zstd",
 ) -> dict[str, Any]:
     """Add the regular-grid visualization profile to an existing SpatialData store.
@@ -108,6 +110,9 @@ def add_spatial_tiling(
         Add per-gene statistics to ``var`` and a gene-major (CSC) copy of ``X`` as a layer,
         so a client can read one gene without downloading the whole matrix. Costs a second
         copy of the non-zeros.
+    cluster_column
+        Categorical ``obs`` column to colour cells by. Its palette is written to
+        ``uns["<column>_colors"]``, the scanpy convention.
     compression
         Parquet compression codec.
 
@@ -203,6 +208,8 @@ def add_spatial_tiling(
         import scipy.sparse as sp
 
         stats = add_gene_statistics(table)
+        colors = add_gene_colors(table)
+        cluster_colors = add_cluster_colors(table, cluster_column) if cluster_column else None
         # SpatialData refuses to overwrite an element inside the store it was read from
         # (scverse/spatialdata#520), so the table is deleted and rewritten. The statistics
         # pass has already materialised X, so nothing is read back from the deleted path.
@@ -213,7 +220,12 @@ def add_spatial_tiling(
         # Written after the table, and directly, because the chunking is the whole point:
         # AnnData sizes chunks for whole-matrix reads, which costs 24x too much per gene.
         layer = write_csc_layer(store / "tables" / table_element, csc) if csc is not None else None
-        expression_index = {"var_statistics": stats, **({"csc": layer} if layer else {})}
+        expression_index = {
+            "var_statistics": stats,
+            **({"csc": layer} if layer else {}),
+            **({"gene_colors": colors} if colors else {}),
+            **({"cluster_colors": cluster_colors} if cluster_colors else {}),
+        }
 
     manifest = build_manifest(
         grid=grid,
@@ -230,6 +242,7 @@ def add_spatial_tiling(
             "store_url": "../..",
             "table": table_element or "table",
             "native": ["metadata", "cbg", "images"],
+            **({"cluster_column": cluster_column} if cluster_column else {}),
             **({"expression_index": expression_index} if expression_index else {}),
         },
         source={
