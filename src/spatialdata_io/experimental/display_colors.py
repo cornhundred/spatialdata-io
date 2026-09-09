@@ -1,13 +1,14 @@
 """Assign display colours to genes and to categorical cell annotations.
 
 There is no biologically correct colour for a gene, so these are invented either way. The
-question is only where they live, and a ``var`` column is the better answer than a
-viewer-specific file: it round-trips through AnnData, scanpy and any other tool can see it,
-and it survives a re-read.
+question is only where they live, and AnnData already has an answer: ``uns`` holds
+``<name>_colors`` lists aligned to an ordering. Both functions here follow it, so nothing
+new is being proposed -- gene colours go to ``uns["gene_colors"]`` in ``var_names`` order,
+cluster colours to ``uns["<column>_colors"]`` in category order, exactly as scanpy writes
+them.
 
-Worth being explicit that a gene colour column is a **new convention**. AnnData has
-``uns["<column>_colors"]`` for *obs* categoricals -- which :func:`add_cluster_colors`
-follows exactly -- but nothing for genes.
+This is better than a ``var`` column for the same reason it is better than a viewer-specific
+file: it is the shape existing tools already look for.
 
 The palette matches the fallback Celldega generates when a store has no colours, so a store
 looks the same whether or not this ran.
@@ -18,10 +19,11 @@ from __future__ import annotations
 import colorsys
 from typing import Any
 
-__all__ = ["add_gene_colors", "add_cluster_colors", "palette", "GENE_COLOR_COLUMN"]
+__all__ = ["add_gene_colors", "add_cluster_colors", "palette", "GENE_COLORS_KEY"]
 
-#: ``var`` column holding a hex colour per gene.
-GENE_COLOR_COLUMN = "color"
+#: ``uns`` key holding one hex colour per gene, in ``var_names`` order. Follows AnnData's
+#: existing ``<name>_colors`` convention rather than introducing a ``var`` column.
+GENE_COLORS_KEY = "gene_colors"
 
 #: Successive hues are separated by the golden ratio, which keeps neighbouring entries
 #: visually distinct instead of walking through a smooth ramp where adjacent genes look
@@ -42,20 +44,20 @@ def palette(n: int) -> list[str]:
     return colors
 
 
-def add_gene_colors(table: Any, column: str = GENE_COLOR_COLUMN, overwrite: bool = False) -> str | None:
-    """Add a hex colour per gene to ``table.var``, in place.
+def add_gene_colors(table: Any, key: str = GENE_COLORS_KEY, overwrite: bool = False) -> str | None:
+    """Add one hex colour per gene to ``table.uns``, in place.
 
-    Colours are assigned by position in ``var``, which is the order a client indexes with
+    Colours are ordered by position in ``var``, which is the order a client indexes with
     ``feature_code``. Controls are not in ``var`` and get the client's fallback colour.
 
     Returns
     -------
-    The column name, or ``None`` when one already exists and ``overwrite`` is False.
+    The ``uns`` key, or ``None`` when one already exists and ``overwrite`` is False.
     """
-    if column in table.var and not overwrite:
+    if key in table.uns and not overwrite:
         return None
-    table.var[column] = palette(table.n_vars)
-    return column
+    table.uns[key] = palette(table.n_vars)
+    return key
 
 
 def add_cluster_colors(table: Any, column: str, overwrite: bool = False) -> str | None:
