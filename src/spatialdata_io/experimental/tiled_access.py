@@ -41,6 +41,7 @@ from spatialdata_io.experimental.manifest import (
     build_manifest,
     validate_manifest,
     write_manifest,
+    write_root_manifest,
 )
 from spatialdata_io.experimental.points_parquet import (
     DisplayTransform,
@@ -131,6 +132,7 @@ def add_spatial_tiling(
     technology: str = "Xenium",
     index_expression: bool = True,
     cluster_column: str | None = None,
+    profile_layout: str = "v1",
     compression: str = "zstd",
     _expression_index: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -170,6 +172,13 @@ def add_spatial_tiling(
     cluster_column
         Categorical ``obs`` column to colour cells by. Its palette is written to
         ``uns["<column>_colors"]``, the scanpy convention.
+    profile_layout
+        ``"v1"`` writes the display Parquets and a manifest file under
+        ``visualization/grid_files_v1``. ``"canonical"`` writes neither: the canonical
+        Parquets carry everything a viewer needs, so the geometry is written as
+        ``geoarrow`` (the only encoding GeoArrow deck.gl layers can read), the points
+        columns are ordered so a projection spans no unwanted column, and the manifest goes
+        into the store's root attributes. No ``visualization/`` directory is created.
     compression
         Parquet compression codec.
 
@@ -197,24 +206,36 @@ def add_spatial_tiling(
         names = sorted(observed.cat.as_known().cat.categories) if hasattr(observed, "cat") else []
         catalog = FeatureCatalog(names=tuple(names), n_genes=len(names))
 
+    canonical_only = profile_layout == "canonical"
+    if profile_layout not in ("v1", "canonical"):
+        raise ValueError(f"profile_layout must be 'v1' or 'canonical', not {profile_layout!r}")
+
     profile_dir = store / PROFILE_DIR / PROFILE_NAME
-    profile_dir.mkdir(parents=True, exist_ok=True)
+    if not canonical_only:
+        profile_dir.mkdir(parents=True, exist_ok=True)
+
+    # Reading x, y and feature_name costs 27.7 KiB with z between them and 19.7 KiB
+    # without, because parquet-wasm coalesces a projection into one contiguous byte range.
+    render_first = ["x", "y", feature_key] if canonical_only else None
+    geometry_encoding = "geoarrow" if canonical_only else "WKB"
 
     # The render columns go to a standalone file inside the profile directory. A viewer
     # reads every column of it, so it needs no column projection, and the canonical
     # element is left free of nested Arrow columns.
-    transcripts = write_points_regular_grid(
-        points,
-        profile_dir / "trx",
-        catalog=catalog,
-        grid=grid,
-        display_transform=transform,
-        feature_key=feature_key,
-        max_row_groups_per_file=max_row_groups_per_file,
-        compression=compression,
-        render_only=True,
-        overwrite=True,
-    )
+    transcripts = None
+    if not canonical_only:
+        transcripts = write_points_regular_grid(
+            points,
+            profile_dir / "trx",
+            catalog=catalog,
+            grid=grid,
+            display_transform=transform,
+            feature_key=feature_key,
+            max_row_groups_per_file=max_row_groups_per_file,
+            compression=compression,
+            render_only=True,
+            overwrite=True,
+        )
     # The canonical element is re-ordered into tile row groups but keeps only its own
     # columns, so it still round-trips through SpatialData.write() and normal reads.
     write_points_regular_grid(
@@ -226,6 +247,7 @@ def add_spatial_tiling(
         feature_key=feature_key,
         max_row_groups_per_file=max_row_groups_per_file,
         compression=compression,
+        column_order=render_first,
         overwrite=True,
     )
 
@@ -236,17 +258,18 @@ def add_spatial_tiling(
         shapes = sdata.shapes[shapes_element]
         shapes_transform = DisplayTransform.from_element(shapes, coordinate_system)
         cell_positions = _cell_positions_for_shapes(table, shapes_element) if table is not None else None
-        cell_segmentation = write_shapes_regular_grid(
-            shapes,
-            profile_dir / "cell_seg",
-            grid=grid,
-            display_transform=shapes_transform,
-            cell_index=cell_positions,
-            max_row_groups_per_file=max_row_groups_per_file,
-            compression=compression,
-            render_only=True,
-            overwrite=True,
-        )
+        if not canonical_only:
+            cell_segmentation = write_shapes_regular_grid(
+                shapes,
+                profile_dir / "cell_seg",
+                grid=grid,
+                display_transform=shapes_transform,
+                cell_index=cell_positions,
+                max_row_groups_per_file=max_row_groups_per_file,
+                compression=compression,
+                render_only=True,
+                overwrite=True,
+            )
         write_shapes_regular_grid(
             shapes,
             store / "shapes" / shapes_element / "shapes.parquet",
@@ -255,6 +278,7 @@ def add_spatial_tiling(
             cell_index=cell_positions,
             max_row_groups_per_file=max_row_groups_per_file,
             compression=compression,
+            geometry_encoding=geometry_encoding,
             overwrite=True,
         )
 
@@ -309,8 +333,14 @@ def add_spatial_tiling(
             "tile_size_px": tile_size_px,
         },
     )
-    validate_manifest(manifest, base_path=profile_dir)
-    write_manifest(manifest, profile_dir)
+    if canonical_only:
+        # No profile directory exists to validate paths against, and there are no display
+        # files to point at. Root attributes also survive read_zarr(...).write(...), which
+        # a sidecar directory does not.
+        write_root_manifest(store, manifest)
+    else:
+        validate_manifest(manifest, base_path=profile_dir)
+        write_manifest(manifest, profile_dir)
     return manifest
 
 

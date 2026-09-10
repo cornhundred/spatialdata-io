@@ -21,6 +21,8 @@ from typing import Any
 from spatialdata_io.experimental.regular_grid import RegularGrid
 
 __all__ = [
+    "ROOT_MANIFEST_KEY",
+    "write_root_manifest",
     "PROFILE_NAME",
     "PROFILE_VERSION",
     "MANIFEST_FILENAME",
@@ -32,6 +34,9 @@ __all__ = [
 PROFILE_NAME = "grid_files_v1"
 PROFILE_VERSION = "0.1.0"
 MANIFEST_FILENAME = "landscape_parameters.json"
+
+#: Root Zarr attribute holding the manifest when no profile directory is written.
+ROOT_MANIFEST_KEY = "spatial_tiling"
 
 
 def build_manifest(
@@ -195,6 +200,23 @@ def _check_paths(name: str, entry: dict[str, Any], base: Path | None) -> None:
             raise ValueError(f"{name}: declared path {entry['path']} does not exist")
     else:
         raise ValueError(f"{name}: entry has neither 'files' nor 'path'")
+
+
+def write_root_manifest(store: Any, manifest: dict[str, Any], key: str = ROOT_MANIFEST_KEY) -> None:
+    """Record the manifest in the store's root Zarr attributes instead of a file.
+
+    This removes the need for a ``visualization/`` directory at all, and it is strictly
+    better than a file for one measured reason: root attributes survive
+    ``read_zarr(...).write(other_store)``, while a sidecar directory does not. The profile
+    metadata therefore travels with the store through an ordinary SpatialData round-trip.
+
+    The block is namespaced under one key so it cannot collide with SpatialData's own
+    ``spatialdata_attrs``.
+    """
+    import zarr
+
+    root = zarr.open_group(str(store), mode="a")
+    root.attrs[key] = manifest
 
 
 def write_manifest(manifest: dict[str, Any], directory: str | Path) -> Path:

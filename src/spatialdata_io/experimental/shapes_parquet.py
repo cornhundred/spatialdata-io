@@ -90,7 +90,7 @@ def _display_geometry_array(
     return polygons, cx, cy
 
 
-def _canonical_geoparquet_table(shapes: Any) -> pa.Table:
+def _canonical_geoparquet_table(shapes: Any, geometry_encoding: str = "WKB") -> pa.Table:
     """Convert a GeoDataFrame to Arrow while keeping the GeoParquet ``geo`` metadata.
 
     ``GeoDataFrame.to_arrow()`` emits GeoArrow *extension* metadata but not the GeoParquet
@@ -107,7 +107,11 @@ def _canonical_geoparquet_table(shapes: Any) -> pa.Table:
             "geopandas.io.arrow._geopandas_to_arrow is required to preserve GeoParquet metadata"
         ) from exc
 
-    table = _geopandas_to_arrow(shapes, index=None, geometry_encoding="WKB")
+    # "geoarrow" writes list<list<struct<x, y>>> tagged `geoarrow.polygon`, which
+    # @geoarrow/deck.gl-layers reads directly. Those layers cannot read WKB at all -- they
+    # accept only the geoarrow extension types -- so the encoding is what decides whether
+    # a browser can render the canonical geometry without a separate display column.
+    table = _geopandas_to_arrow(shapes, index=None, geometry_encoding=geometry_encoding)
     if b"geo" not in (table.schema.metadata or {}):  # pragma: no cover - defensive
         raise RuntimeError("geopandas did not produce GeoParquet 'geo' metadata")
     return table
@@ -121,6 +125,7 @@ def write_shapes_regular_grid(
     display_transform: DisplayTransform | None = None,
     coordinate_system: str = "global",
     cell_index: Any | None = None,
+    geometry_encoding: str = "WKB",
     max_row_groups_per_file: int = DEFAULT_MAX_ROW_GROUPS_PER_FILE,
     compression: str = "zstd",
     render_only: bool = False,
@@ -166,7 +171,7 @@ def write_shapes_regular_grid(
     # written before the split cleans it up instead of preserving them.
     stale = [c for c in (GEOMETRY_COLUMN, CELL_CODE_COLUMN) if c in shapes.columns]
     canonical = shapes.drop(columns=stale) if stale else shapes
-    table = None if render_only else _canonical_geoparquet_table(canonical)
+    table = None if render_only else _canonical_geoparquet_table(canonical, geometry_encoding)
 
     if cell_index is None:
         codes = np.arange(len(shapes), dtype=np.uint32)
