@@ -138,7 +138,7 @@ def validate_manifest(manifest: dict[str, Any], base_path: str | Path | None = N
         With a message naming the specific problem. Failing here is much cheaper than
         failing as a blank viewport in a browser.
     """
-    for key in ("technology", "use_row_groups", "tile_grid", "row_group_files"):
+    for key in ("profile", "tile_grid", "row_group_files"):
         if key not in manifest:
             raise ValueError(f"manifest is missing required key {key!r}")
 
@@ -205,10 +205,9 @@ def _check_paths(name: str, entry: dict[str, Any], base: Path | None) -> None:
 def write_root_manifest(store: Any, manifest: dict[str, Any], key: str = ROOT_MANIFEST_KEY) -> None:
     """Record the manifest in the store's root Zarr attributes instead of a file.
 
-    This removes the need for a ``visualization/`` directory at all, and it is strictly
-    better than a file for one measured reason: root attributes survive
-    ``read_zarr(...).write(other_store)``, while a sidecar directory does not. The profile
-    metadata therefore travels with the store through an ordinary SpatialData round-trip.
+    This removes the need for a ``visualization/`` directory. The manifest describes the
+    row-group layout of the canonical Parquets and must be regenerated after an ordinary
+    SpatialData rewrite, which does not preserve that physical layout.
 
     The block is namespaced under one key so it cannot collide with SpatialData's own
     ``spatialdata_attrs``.

@@ -263,10 +263,11 @@ def write_shapes_regular_grid(
         "max_row_groups_per_file": max_row_groups_per_file,
         "total_row_groups": grid.num_tiles,
         "n_shapes": int(table.num_rows),
-        "geometry_is_lossy": True,
-        "geometry_note": "exterior ring of the largest polygon part; canonical geometry retained",
+        "geometry_is_lossy": render_only,
         "tile_grid": grid.to_manifest_dict(),
     }
+    if render_only:
+        fragment["geometry_note"] = "exterior ring of the largest polygon part; canonical geometry retained"
     if single_file:
         fragment["path"] = output_path.name
     else:

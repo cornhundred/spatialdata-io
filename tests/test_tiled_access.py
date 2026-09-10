@@ -18,6 +18,7 @@ from shapely.geometry import Polygon
 from spatialdata_io.experimental.manifest import (
     MANIFEST_FILENAME,
     PROFILE_NAME,
+    ROOT_MANIFEST_KEY,
     build_manifest,
     validate_manifest,
     write_manifest,
@@ -209,6 +210,57 @@ def test_tiled_store_still_reads_with_read_zarr(store: Path) -> None:
     # the canonical element keeps no nested Arrow column.
     assert "display_xy" not in after.points["transcripts"].columns
     assert "display_geometry" not in after.shapes["cell_boundaries"].columns
+
+
+def test_canonical_layout_uses_store_elements_and_root_manifest(store: Path) -> None:
+    """Canonical mode adds tiling in place without creating display-only files."""
+    import spatialdata
+    import zarr
+
+    manifest = add_spatial_tiling(store, tile_size_px=10.0, profile_layout="canonical")
+
+    assert not (store / "visualization").exists()
+    assert manifest["spatialdata"]["store_url"] == "."
+    assert "native" not in manifest["spatialdata"]
+    for celldega_key in (
+        "technology",
+        "use_row_groups",
+        "use_int_index",
+        "segmentation_approach",
+        "image_info",
+        "image_format",
+    ):
+        assert celldega_key not in manifest
+    assert "images" not in manifest["row_group_files"]
+    assert manifest["source"]["technology"] == "Xenium"
+
+    root = zarr.open_group(store, mode="r")
+    assert root.attrs[ROOT_MANIFEST_KEY] == manifest
+
+    transcripts = manifest["row_group_files"]["transcripts"]
+    assert transcripts["directory"] == "points/transcripts/points.parquet"
+    assert transcripts["position_encoding"] == "separate_columns"
+    assert transcripts["position_columns"] == ["x", "y"]
+    assert transcripts["feature_column"] == "feature_name"
+    assert transcripts["feature_encoding"] == "dictionary"
+
+    cells = manifest["row_group_files"]["cell_segmentation"]
+    assert cells["path"] == "shapes/cell_boundaries/shapes.parquet"
+    assert "directory" not in cells
+    assert cells["geometry_column"] == "geometry"
+    assert cells["geometry_encoding"] == "geoarrow.polygon"
+    assert cells["geometry_is_lossy"] is False
+    assert cells["display_transform"]["affine_matrix"][0][0] == 2.0
+
+    validate_manifest(manifest, base_path=store)
+    reopened = spatialdata.read_zarr(store)
+    assert len(reopened.points["transcripts"]) == 200
+    assert len(reopened.shapes["cell_boundaries"]) == 12
+
+
+def test_invalid_profile_layout_is_rejected_before_writing(store: Path) -> None:
+    with pytest.raises(ValueError, match="profile_layout must be"):
+        add_spatial_tiling(store, profile_layout="unknown")
 
 
 def test_manifest_paths_resolve_from_the_profile_directory(store: Path) -> None:

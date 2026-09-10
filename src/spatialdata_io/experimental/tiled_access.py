@@ -52,6 +52,7 @@ from spatialdata_io.experimental.regular_grid import (
     RegularGrid,
 )
 from spatialdata_io.experimental.shapes_parquet import (
+    CELL_CODE_COLUMN,
     write_shapes_regular_grid,
 )
 
@@ -238,7 +239,7 @@ def add_spatial_tiling(
         )
     # The canonical element is re-ordered into tile row groups but keeps only its own
     # columns, so it still round-trips through SpatialData.write() and normal reads.
-    write_points_regular_grid(
+    canonical_points = write_points_regular_grid(
         points,
         store / "points" / points_element / "points.parquet",
         catalog=catalog,
@@ -250,6 +251,20 @@ def add_spatial_tiling(
         column_order=render_first,
         overwrite=True,
     )
+
+    if canonical_only:
+        # Describe the canonical file instead of a display file. Coordinates are two
+        # separate columns rather than one interleaved column, which is what a client has
+        # to know to read them: there is no display_xy to fall back on.
+        transcripts = {
+            **{k: v for k, v in canonical_points.items() if not k.startswith("position_")},
+            "directory": f"points/{points_element}/points.parquet",
+            "position_encoding": "separate_columns",
+            "position_columns": ["x", "y"],
+            "feature_column": feature_key,
+            "feature_encoding": "dictionary",
+            "render_only": False,
+        }
 
     cell_segmentation = None
     if shapes_element:
@@ -270,7 +285,7 @@ def add_spatial_tiling(
                 render_only=True,
                 overwrite=True,
             )
-        write_shapes_regular_grid(
+        canonical_shapes = write_shapes_regular_grid(
             shapes,
             store / "shapes" / shapes_element / "shapes.parquet",
             grid=grid,
@@ -281,6 +296,25 @@ def add_spatial_tiling(
             geometry_encoding=geometry_encoding,
             overwrite=True,
         )
+
+        if canonical_only:
+            cell_segmentation = {
+                **{
+                    k: v
+                    for k, v in canonical_shapes.items()
+                    if k not in {"directory", "path", "geometry_column", "geometry_is_lossy", "geometry_note"}
+                },
+                "geometry_column": "geometry",
+                "geometry_encoding": "geoarrow.polygon",
+                "cell_id_column": CELL_CODE_COLUMN,
+                "display_transform": shapes_transform.to_manifest_dict(),
+                "geometry_is_lossy": False,
+                "render_only": False,
+            }
+            if "files" in canonical_shapes:
+                cell_segmentation["directory"] = f"shapes/{shapes_element}/shapes.parquet"
+            else:
+                cell_segmentation["path"] = f"shapes/{shapes_element}/shapes.parquet"
 
     # Gene-major access and a gene list both require reading every non-zero from a CSR
     # matrix. Precomputing the statistics and storing a CSC copy turns "download the
@@ -304,8 +338,8 @@ def add_spatial_tiling(
     if table is not None:
         native_components[:0] = ["metadata", "cbg"]
     spatialdata_manifest: dict[str, Any] = {
-        "store_url": "../..",
-        "native": native_components,
+        "store_url": "." if canonical_only else "../..",
+        **({} if canonical_only else {"native": native_components}),
         **({"table": table_element} if table_element else {}),
         **({"cluster_column": cluster_column} if cluster_column else {}),
         **({"expression_index": expression_index} if expression_index else {}),
@@ -326,6 +360,7 @@ def add_spatial_tiling(
         spatialdata=spatialdata_manifest,
         source={
             "store": store.name,
+            "technology": technology,
             "points_element": points_element,
             "shapes_element": shapes_element,
             "table_element": table_element,
@@ -334,9 +369,24 @@ def add_spatial_tiling(
         },
     )
     if canonical_only:
-        # No profile directory exists to validate paths against, and there are no display
-        # files to point at. Root attributes also survive read_zarr(...).write(...), which
-        # a sidecar directory does not.
+        # The root attribute is a storage/access description, not a Celldega settings
+        # file. The Celldega adapter supplies its own defaults after discovering this
+        # profile. Keep the v1 file manifest unchanged for DegaFiles compatibility.
+        for key in (
+            "technology",
+            "use_row_groups",
+            "use_int_index",
+            "segmentation_approach",
+            "tile_size",
+            "image_info",
+            "image_format",
+        ):
+            manifest.pop(key, None)
+        manifest["row_group_files"].pop("images", None)
+        # Canonical paths are relative to the store root, which is also where this
+        # manifest lives. Validate before publishing it so a malformed profile cannot
+        # become a blank viewport in the browser.
+        validate_manifest(manifest, base_path=store)
         write_root_manifest(store, manifest)
     else:
         validate_manifest(manifest, base_path=profile_dir)
