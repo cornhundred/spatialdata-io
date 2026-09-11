@@ -176,10 +176,10 @@ def add_spatial_tiling(
     profile_layout
         ``"v1"`` writes the display Parquets and a manifest file under
         ``visualization/grid_files_v1``. ``"canonical"`` writes neither: the canonical
-        Parquets carry everything a viewer needs, so the geometry is written as
-        ``geoarrow`` (the only encoding GeoArrow deck.gl layers can read), the points
-        columns are ordered so a projection spans no unwanted column, and the manifest goes
-        into the store's root attributes. No ``visualization/`` directory is created.
+        Parquets carry everything a viewer needs. Geometry is written as ``geoarrow`` so a
+        browser can decode coordinate buffers without parsing WKB; point columns are ordered
+        so a projection spans no unwanted column; and the manifest goes into the store's root
+        attributes. No ``visualization/`` directory is created.
     compression
         Parquet compression codec.
 

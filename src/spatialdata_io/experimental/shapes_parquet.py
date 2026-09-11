@@ -107,10 +107,10 @@ def _canonical_geoparquet_table(shapes: Any, geometry_encoding: str = "WKB") -> 
             "geopandas.io.arrow._geopandas_to_arrow is required to preserve GeoParquet metadata"
         ) from exc
 
-    # "geoarrow" writes list<list<struct<x, y>>> tagged `geoarrow.polygon`, which
-    # @geoarrow/deck.gl-layers reads directly. Those layers cannot read WKB at all -- they
-    # accept only the geoarrow extension types -- so the encoding is what decides whether
-    # a browser can render the canonical geometry without a separate display column.
+    # "geoarrow" writes list<list<struct<x, y>>> tagged `geoarrow.polygon`. Celldega
+    # reads those coordinate buffers without parsing WKB, then materialises the visible
+    # paths for deck.gl's PathLayer. This encoding therefore makes canonical geometry
+    # browser-readable without adding a separate display column.
     table = _geopandas_to_arrow(shapes, index=None, geometry_encoding=geometry_encoding)
     if b"geo" not in (table.schema.metadata or {}):  # pragma: no cover - defensive
         raise RuntimeError("geopandas did not produce GeoParquet 'geo' metadata")

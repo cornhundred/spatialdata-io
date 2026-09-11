@@ -166,8 +166,8 @@ def _prepare_table(
 
     if render_only:
         # Only the render columns. A viewer reads every column of this file, which is
-        # why no column projection is needed -- and parquet-wasm's projection is broken
-        # anyway (any `columns` argument corrupts the IPC stream it emits).
+        # why no column projection is needed. Projection is broken in released
+        # parquet-wasm 0.7.2; Celldega temporarily uses a patched build.
         table = pa.table(
             {
                 POSITION_COLUMN: _interleaved_positions(px, py),
@@ -180,7 +180,8 @@ def _prepare_table(
     # separate file, for two reasons: a nested Arrow column cannot survive dask's parquet
     # round-trip (SpatialData.write() either fails or silently returns it as a string),
     # and a standalone render file means a viewer reads every column of it, so no column
-    # projection is needed -- which matters because parquet-wasm's projection is broken.
+    # projection is needed -- which matters while released parquet-wasm lacks the
+    # projection fix carried by Celldega's temporary patched build.
     #
     # Any render columns left by an earlier version are dropped, so re-tiling a store
     # written before this change cleans it up rather than preserving them.
